@@ -1,11 +1,16 @@
-from sentence_transformers import SentenceTransformer, LoggingHandler
+from sentence_transformers import SentenceTransformer
 import numpy as np
-import logging
 import pandas as pd
 import re
 
 
 def read_excel_file(file_path, sheet_name=0):
+    """
+    读取excel第一列数据到数组中，不带表头
+    :param file_path: excel文件地址
+    :param sheet_name: 读取的sheet名，默认是第一张表
+    :return:
+    """
     if file_path:
         df = pd.read_excel(io=file_path, sheet_name=sheet_name, usecols=[0], names=None)
         results = []
@@ -16,78 +21,99 @@ def read_excel_file(file_path, sheet_name=0):
         print('未输入文件地址')
 
 
-def get_comments(item_str):
-    item_lines = item_str.split("\n")
-    print(f"before process len:{len(item_lines)}")
+def get_single_role_comments(row_str):
+    """
+    获取 Legal 角色评论内容
+    :return:
+    """
     comments = []
-    comment = item_lines[0]
-    pattern = re.compile(r".*\(.*\):")
 
+    pattern = re.compile(r".*\(.*\):")
+    line_list = row_str.split("\n")
+    comment = line_list[0]
+
+    for i, line in enumerate(line_list[1:]):
+        match_res = pattern.match(line)
+        if match_res is not None:
+            comments.append(comment)  # 整句话加进去，包括角色
+            comment = line
+        else:
+            comment += line
+    comments.append(comment)
+    for i, comment in enumerate(comments):
+        c_list = comment.split(":")
+        if "法务" in c_list[0]:  # 角色中包含法务
+            return [c_list[1].strip()]
+    return []  # 说明没有法务角色在评论,返回空
+
+
+def get_full_comments(row_str):
+    """
+    获取所有角色评论内容
+    :param row_str:
+    :return:
+    """
+    comments = []
+
+    pattern = re.compile(r".*\(.*\):")
+    item_lines = row_str.split("\n")
+    comment = item_lines[0]
     for i, line in enumerate(item_lines[1:]):
-        M = pattern.match(line)
-        if M is not None:
+        match_res = pattern.match(line)
+        if match_res is not None:  # 说明是新的角色在评论
             comments.append(comment.split(":")[1].strip())
             comment = line
         else:
             comment += line
     comments.append(comment.split(":")[1].strip())
-    print(f"after process len:{len(comments)}")
     return comments
 
 
 def main():
-    df = read_excel_file("sen.xlsx")
-    print(f"len df:{len(df)}")
+    # step1: 数据加载
+    rows = read_excel_file("sen.xlsx")
+    print(f"--------清洗前数据条数:{len(rows)}--------")
+
+    # step2: 数据清洗
     null_count = 0
-    sen_list = []
-    sen_list_indices = []
-    for i, d in enumerate(df):
-        if d != "(null)" and d != "(空字符串)":
-            comments = get_comments(d)
-            sen_list.append(comments)
-            sen_list_indices.append(i)
+    no_legal_cnt = 0
+    sen_list = []  # 存储清洗后的sentence
+    sen_index_list = []  # 存储清洗后的sentence在原表格中的行号
+    for i, row in enumerate(rows):
+        if row != "(null)" and row != "(空字符串)":
+            # comments = get_full_comments(row)
+            comments = get_single_role_comments(row)
+            if len(comments) >= 1:
+                sen_list.append(comments)
+                sen_index_list.append(i)
+            else:
+                no_legal_cnt += 1
         else:
             null_count += 1
-    print(f"len sen_list:{len(sen_list)}, null comment:{null_count}")
+    print(f"--------清洗后数据条数:{len(sen_list)}, 空数据条数:{null_count}, 无legal评论数据条数:{no_legal_cnt}--------")
 
-    # Load pre-trained Sentence Transformer Model. It will be downloaded automatically
-    # These models find semantically similar sentences within one language or across languages:
-    #
-    # distiluse-base-multilingual-cased-v1: Multilingual knowledge distilled version of multilingual Universal Sentence Encoder. Supports 15 languages: Arabic, Chinese, Dutch, English, French, German, Italian, Korean, Polish, Portuguese, Russian, Spanish, Turkish.
-    #
-    # distiluse-base-multilingual-cased-v2: Multilingual knowledge distilled version of multilingual Universal Sentence Encoder. This version supports 50+ languages, but performs a bit weaker than the v1 model.
-    #
-    # paraphrase-multilingual-MiniLM-L12-v2 - Multilingual version of paraphrase-MiniLM-L12-v2, trained on parallel data for 50+ languages.
-    #
-    # paraphrase-multilingual-mpnet-base-v2 - Multilingual version of paraphrase-mpnet-base-v2, trained on parallel data for 50+ languages.
-
+    # step3: 提取特征向量
+    embedding_res = []
     model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
-    print("Max Sequence Length:", model.max_seq_length)
+    for i, sen in enumerate(sen_list):
+        assert type(sen) == list
+        assert len(sen) >= 1
 
-    # Embed a list of sentences
-    output = []
-    for i, comments in enumerate(sen_list):
-        assert type(comments) == list
-        assert len(comments) >= 1
-        sentences = comments
-
-        sentence_embeddings = model.encode(sentences)
-        print(type(sentence_embeddings))
-        print(sentence_embeddings.shape)
-
+        sentence_embeddings = model.encode(sen)
+        # print(type(sentence_embeddings), "\n", sentence_embeddings.shape)
         comment_embedding = np.mean(sentence_embeddings, axis=0)
-        assert comment_embedding.shape == (768, )
+        assert comment_embedding.shape == (768,)
+        embedding_res.append(comment_embedding)
 
-        output.append(comment_embedding)
-        # The result is a list of sentence embeddings as numpy arrays
-        # for sentence, embedding in zip(sentences, sentence_embeddings):
-        #     print("Sentence:", sentence)
-        #     print("Embedding:", embedding)
-        #     print(type(embedding))
-    print(f"len embedding:{len(output)}")
-    assert len(sen_list) == len(output)
-    np.savetxt("comments_vectors_single_comment.txt", output)
-    np.savetxt("comments_indices_single_comment.txt", sen_list_indices)
+    print(f"--------embedding数据条数:{len(embedding_res)}--------")
+    assert len(sen_list) == len(embedding_res)
+
+    # step4: 数据保存
+    # np.savetxt("comments_vectors.txt", embedding_res)
+    # np.savetxt("comments_indices.txt", sen_index_list)
+    np.savetxt("comments_vectors_single_comment.txt", embedding_res)
+    np.savetxt("comments_indices_single_comment.txt", sen_index_list, fmt='%i')
+
 
 if __name__ == "__main__":
     main()
